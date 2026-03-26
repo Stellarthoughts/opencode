@@ -37,7 +37,7 @@ export namespace Format {
     Effect.gen(function* () {
       const state = yield* InstanceState.make(
         Effect.fn("Format.state")(function* (_ctx) {
-          const enabled: Record<string, boolean> = {}
+          const enabled: Record<string, string[] | false> = {}
           const formatters: Record<string, Formatter.Info> = {}
 
           const cfg = yield* Effect.promise(() => Config.get())
@@ -62,7 +62,7 @@ export namespace Format {
               formatters[name] = {
                 ...info,
                 name,
-                enabled: async () => true,
+                enabled: async () => info.command,
               }
             }
           } else {
@@ -83,17 +83,27 @@ export namespace Format {
             const checks = await Promise.all(
               matching.map(async (item) => {
                 log.info("checking", { name: item.name, ext })
-                const on = await isEnabled(item)
-                if (on) {
+                const cmd = await isEnabled(item)
+                if (cmd) {
                   log.info("enabled", { name: item.name, ext })
                 }
-                return {
-                  item,
-                  enabled: on,
-                }
+                return { item, cmd }
               }),
             )
-            return checks.filter((x) => x.enabled).map((x) => x.item)
+            const result: Array<{
+              name: string
+              command: string[]
+              environment?: Record<string, string>
+            }> = []
+            for (const { item, cmd } of checks) {
+              if (cmd !== false)
+                result.push({
+                  name: item.name,
+                  command: cmd,
+                  environment: item.environment,
+                })
+            }
+            return result
           }
 
           async function formatFile(filepath: string) {
@@ -152,7 +162,7 @@ export namespace Format {
           result.push({
             name: formatter.name,
             extensions: formatter.extensions,
-            enabled: isOn,
+            enabled: !!isOn,
           })
         }
         return result
