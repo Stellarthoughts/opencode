@@ -1,18 +1,7 @@
-import { Installation } from "@/installation"
 import { Provider } from "@/provider/provider"
 import { Log } from "@/util/log"
-import {
-  streamText,
-  wrapLanguageModel,
-  type ModelMessage,
-  type StreamTextResult,
-  type Tool,
-  type ToolSet,
-  tool,
-  jsonSchema,
-} from "ai"
+import { streamText, wrapLanguageModel, type ModelMessage, type Tool, tool, jsonSchema } from "ai"
 import { mergeDeep, pipe } from "remeda"
-import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
 import { Config } from "@/config/config"
 import { Instance } from "@/project/instance"
@@ -23,6 +12,7 @@ import { SystemPrompt } from "./system"
 import { Flag } from "@/flag/flag"
 import { Permission } from "@/permission"
 import { Auth } from "@/auth"
+import { Installation } from "@/installation"
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -42,8 +32,6 @@ export namespace LLM {
     retries?: number
     toolChoice?: "auto" | "required" | "none"
   }
-
-  export type StreamOutput = StreamTextResult<ToolSet, unknown>
 
   export async function stream(input: StreamInput) {
     const l = log
@@ -113,7 +101,7 @@ export namespace LLM {
       options.instructions = system.join("\n")
     }
 
-    const isWorkflow = language instanceof GitLabWorkflowLanguageModel
+    const isWorkflow = input.model.providerID === "gitlab" && input.model.id.startsWith("duo-workflow-")
     const messages = isOpenaiOauth
       ? input.messages
       : isWorkflow
@@ -191,8 +179,20 @@ export namespace LLM {
     // Wire up toolExecutor for DWS workflow models so that tool calls
     // from the workflow service are executed via opencode's tool system
     // and results sent back over the WebSocket.
-    if (language instanceof GitLabWorkflowLanguageModel) {
-      const workflowModel = language
+    if (isWorkflow) {
+      const workflowModel = language as unknown as {
+        systemPrompt: string
+        toolExecutor: (
+          toolName: string,
+          argsJson: string,
+          requestID: string,
+        ) => Promise<{
+          result: string
+          error?: string
+          metadata?: unknown
+          title?: unknown
+        }>
+      }
       workflowModel.systemPrompt = system.join("\n")
       workflowModel.toolExecutor = async (toolName, argsJson, _requestID) => {
         const t = tools[toolName]
@@ -273,8 +273,10 @@ export namespace LLM {
         model: language,
         middleware: [
           {
+            specificationVersion: "v3" as const,
             async transformParams(args) {
               if (args.type === "stream") {
+                // TODO: verify that LanguageModelV3Prompt is still compat here!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
                 // @ts-expect-error
                 args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, options)
               }
