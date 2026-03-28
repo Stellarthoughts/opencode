@@ -71,6 +71,10 @@ export namespace SearchAgent {
     if (!cfg) return
     const msgs = filter(input.messages, new Set(cfg.messageFilter.includeToolResults))
     if (msgs.length === 0) return
+    log.info("search agent executing", {
+      sessionID: input.sessionID,
+      messages: msgs.length,
+    })
 
     const parsed = Provider.parseModel(cfg.model)
     const model = await Provider.getModel(parsed.providerID, parsed.modelID)
@@ -122,6 +126,12 @@ export namespace SearchAgent {
     if (!call) return
 
     const args = parse(call.input)
+    log.info("search agent queries", {
+      sessionID: input.sessionID,
+      searchQueries: args.search,
+      recallQueries: args.recall,
+    })
+
     const found = await search(args, timeout)
     if (!found) return
     const output = [
@@ -132,6 +142,13 @@ export namespace SearchAgent {
       .join("\n\n")
 
     if (!output.trim()) return
+    log.info("search agent mcp results", {
+      sessionID: input.sessionID,
+      searchResults: found.search?.count ?? 0,
+      recallResults: found.recall?.count ?? 0,
+      outputSize: output.length,
+    })
+
     return {
       tool: toolName,
       input: call.input as Record<string, unknown>,
@@ -153,7 +170,13 @@ export namespace SearchAgent {
 
   async function boot(sessionID: string, cfg: Config.SearchAgent) {
     const hit = cache.get(sessionID)
-    if (hit) return hit
+    if (hit) {
+      log.info("search agent boot cache hit", {
+        sessionID,
+        size: hit.length,
+      })
+      return hit
+    }
 
     if (!cfg.model.toLowerCase().includes("haiku")) {
       log.warn("search agent model is not haiku", {
@@ -163,19 +186,34 @@ export namespace SearchAgent {
     }
 
     const tools = await MCP.tools()
-    const lines = await Promise.all(
+    const rows = await Promise.all(
       cfg.bootTools.map(async (name) => {
         const pick = pickTool(tools, name)
-        if (!pick?.execute) return `- ${name}: unavailable`
+        if (!pick?.execute) {
+          return {
+            text: `- ${name}: unavailable`,
+            called: false,
+          }
+        }
         const result = await pick
           .execute({}, { toolCallId: `boot-${name}`, messages: [], abortSignal: AbortSignal.timeout(cfg.timeout) } as any)
           .catch((error: unknown) => ({ error }))
-        return [`<boot tool="${name}">`, toText(result), `</boot>`].join("\n")
+        return {
+          text: [`<boot tool="${name}">`, toText(result), `</boot>`].join("\n"),
+          called: true,
+        }
       }),
     )
+    const lines = rows.map((x) => x.text)
+    const called = rows.filter((x) => x.called).length
 
     const system = [cfg.systemPromptPrefix, lines.join("\n\n")].filter((x) => x.trim()).join("\n\n")
     cache.set(sessionID, system)
+    log.info("search agent boot computed", {
+      sessionID,
+      bootTools: called,
+      size: system.length,
+    })
     return system
   }
 
@@ -291,8 +329,8 @@ export namespace SearchAgent {
     timeout: number,
   ): Promise<
     | {
-        search?: { name: string; text: string }
-        recall?: { name: string; text: string }
+        search?: { name: string; text: string; count: number }
+        recall?: { name: string; text: string; count: number }
       }
     | undefined
   > {
@@ -309,7 +347,7 @@ export namespace SearchAgent {
       tool: ReturnType<typeof pickTool>,
       queries: string[],
       callID: string,
-    ): Promise<{ name: string; text: string } | undefined> => {
+    ): Promise<{ name: string; text: string; count: number } | undefined> => {
       if (queries.length === 0 || !tool?.execute) return
       return tool
         .execute(
@@ -319,7 +357,11 @@ export namespace SearchAgent {
           },
           { toolCallId: callID, messages: [], abortSignal: AbortSignal.timeout(timeout) } as any,
         )
-        .then((result: unknown) => ({ name: tool.id, text: toText(result) }))
+        .then((result: unknown) => ({
+          name: tool.id,
+          text: toText(result),
+          count: toCount(result),
+        }))
         .catch((error: unknown) => {
           log.warn("search agent mcp search failed", {
             tool: id,
@@ -342,6 +384,34 @@ export namespace SearchAgent {
       search: searchResult,
       recall: recallResult,
     }
+  }
+
+  function toCount(input: unknown): number {
+    if (!input) return 0
+    if (Array.isArray(input)) return input.length
+    if (typeof input === "string") {
+      const text = input.trim()
+      if (!text) return 0
+      return 0
+    }
+    if (typeof input !== "object") return 0
+
+    const obj = input as Record<string, unknown>
+    for (const key of ["results", "items", "memories", "matches", "entries"]) {
+      const val = obj[key]
+      if (Array.isArray(val)) return val.length
+    }
+
+    if (!Array.isArray(obj.content)) return 0
+    for (const item of obj.content) {
+      if (!item || typeof item !== "object") continue
+      const row = item as Record<string, unknown>
+      if (row.type === "text" && typeof row.text === "string") {
+        const count = toCount(row.text)
+        if (count > 0) return count
+      }
+    }
+    return obj.content.length
   }
 
   function pickTool(tools: Record<string, Tool>, name: string) {

@@ -321,6 +321,7 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+      const users = msgs.filter((msg) => msg.info.role === "user").length
       const latest = msgs.at(-1)
       const fresh =
         latest?.info.role === "user" &&
@@ -587,7 +588,7 @@ export namespace SessionPrompt {
         throw error
       }
 
-      if (fresh && agent.searchAgent?.enabled && searched !== lastUser.id) {
+      if (fresh && users > 1 && agent.searchAgent?.enabled && searched !== lastUser.id) {
         searched = lastUser.id
         const search = await SearchAgent.execute({
           sessionID,
@@ -836,6 +837,10 @@ export namespace SessionPrompt {
         },
       },
     } satisfies MessageV2.ToolPart)
+    log.info("search agent injected", {
+      sessionID: input.sessionID,
+      size: input.search.output.length,
+    })
   }
 
   async function lastModel(sessionID: SessionID) {
