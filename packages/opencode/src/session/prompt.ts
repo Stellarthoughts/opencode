@@ -49,6 +49,7 @@ import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncate"
 import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
+import { SearchAgent } from "./search-agent"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -294,6 +295,7 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
+    let searched: MessageID | undefined
     const session = await Session.get(sessionID)
     while (true) {
       await SessionStatus.set(sessionID, { type: "busy" })
@@ -319,6 +321,10 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+      const latest = msgs.at(-1)
+      const fresh =
+        latest?.info.role === "user" &&
+        latest.parts.some((part) => part.type === "text" && !part.ignored && part.text.trim().length > 0)
       if (
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
@@ -580,6 +586,26 @@ export namespace SessionPrompt {
         })
         throw error
       }
+
+      if (fresh && agent.searchAgent?.enabled && searched !== lastUser.id) {
+        searched = lastUser.id
+        const search = await SearchAgent.execute({
+          sessionID,
+          messages: msgs,
+          config: agent.searchAgent,
+        })
+        if (search) {
+          await addSearchMessage({
+            sessionID,
+            user: lastUser,
+            agent,
+            model,
+            search,
+          })
+          msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+        }
+      }
+
       const maxSteps = agent.steps ?? Infinity
       const isLastStep = step >= maxSteps
       msgs = await insertReminders({
@@ -754,6 +780,63 @@ export namespace SessionPrompt {
     }
     throw new Error("Impossible")
   })
+
+  async function addSearchMessage(input: {
+    sessionID: SessionID
+    user: MessageV2.User
+    agent: Agent.Info
+    model: Provider.Model
+    search: SearchAgent.Output
+  }) {
+    const now = Date.now()
+    const msg = (await Session.updateMessage({
+      id: MessageID.ascending(),
+      sessionID: input.sessionID,
+      role: "assistant",
+      parentID: input.user.id,
+      mode: input.agent.name,
+      agent: input.agent.name,
+      variant: input.user.variant,
+      path: {
+        cwd: Instance.directory,
+        root: Instance.worktree,
+      },
+      cost: 0,
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+      modelID: input.model.id,
+      providerID: input.model.providerID,
+      finish: "tool-calls",
+      time: {
+        created: now,
+        completed: now,
+      },
+    })) as MessageV2.Assistant
+
+    await Session.updatePart({
+      id: PartID.ascending(),
+      messageID: msg.id,
+      sessionID: input.sessionID,
+      type: "tool",
+      callID: ulid(),
+      tool: input.search.tool,
+      state: {
+        status: "completed",
+        input: input.search.input,
+        output: input.search.output,
+        title: "Memory Search",
+        metadata: input.search.metadata,
+        time: {
+          start: now,
+          end: now,
+        },
+      },
+    } satisfies MessageV2.ToolPart)
+  }
 
   async function lastModel(sessionID: SessionID) {
     for await (const item of MessageV2.stream(sessionID)) {

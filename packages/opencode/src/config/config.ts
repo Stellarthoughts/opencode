@@ -708,6 +708,40 @@ export namespace Config {
   })
   export type Skills = z.infer<typeof Skills>
 
+  export const SearchAgent = z
+    .object({
+      enabled: z.boolean().default(false),
+      model: z.string(),
+      systemPromptPrefix: z
+        .string()
+        .default(
+          "You are a search agent. Read the conversation and formulate memory search queries. Output ONLY a tool call, never text.",
+        ),
+      bootTools: z.array(z.string()).default([]),
+      tool: z
+        .object({
+          name: z.string().default("memory_fetch"),
+          description: z.string().default("Search memory system with targeted queries"),
+          schema: z.any().optional(),
+        })
+        .default(() => ({
+          name: "memory_fetch",
+          description: "Search memory system with targeted queries",
+        })),
+      messageFilter: z
+        .object({
+          includeToolResults: z.array(z.string()).default([]),
+        })
+        .default(() => ({
+          includeToolResults: [],
+        })),
+      timeout: z.number().default(10000),
+    })
+    .meta({
+      ref: "SearchAgentConfig",
+    })
+  export type SearchAgent = z.infer<typeof SearchAgent>
+
   export const Agent = z
     .object({
       model: ModelId.optional(),
@@ -741,6 +775,7 @@ export namespace Config {
         .optional()
         .describe("Maximum number of agentic iterations before forcing text-only response"),
       maxSteps: z.number().int().positive().optional().describe("@deprecated Use 'steps' field instead."),
+      searchAgent: SearchAgent.optional(),
       permission: Permission.optional(),
     })
     .catchall(z.any())
@@ -758,6 +793,7 @@ export namespace Config {
         "color",
         "steps",
         "maxSteps",
+        "searchAgent",
         "options",
         "permission",
         "disable",
