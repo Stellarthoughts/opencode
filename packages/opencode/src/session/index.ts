@@ -269,7 +269,12 @@ export namespace Session {
     // AFAIK other providers (OpenRouter/OpenAI/Gemini etc.) do it the same way e.g. vercel/ai#8794 (comment)
     // Anthropic does it differently though - inputTokens doesn't include cached tokens.
     // It looks like OpenCode's cost calculation assumes all providers return inputTokens the same way Anthropic does (I'm guessing getUsage logic was originally implemented with anthropic), so it's causing incorrect cost calculation for OpenRouter and others.
-    const excludesCachedTokens = !!(input.metadata?.["anthropic"] || input.metadata?.["bedrock"])
+    // Anthropic API returns inputTokens EXCLUDING cached tokens.
+    // Most proxies (OpenRouter, quotio, etc.) return inputTokens INCLUDING cached.
+    // Detect real Anthropic by checking the API URL — proxies use custom baseURLs.
+    const hasAnthropicMeta = !!(input.metadata?.["anthropic"] || input.metadata?.["bedrock"])
+    const isDirectAnthropic = hasAnthropicMeta && input.model.api.url.includes("anthropic.com")
+    const excludesCachedTokens = isDirectAnthropic
     const adjustedInputTokens = safe(
       excludesCachedTokens ? inputTokens : inputTokens - cacheReadInputTokens - cacheWriteInputTokens,
     )
