@@ -16,50 +16,22 @@ export namespace SearchAgent {
     type: "object",
     additionalProperties: false,
     properties: {
-      searchQueries: {
-        type: "array",
-        items: { type: "string" },
-      },
-      recallQueries: {
-        type: "array",
-        items: { type: "string" },
-      },
       queries: {
         type: "array",
         items: {
           type: "object",
           additionalProperties: false,
           properties: {
-            query: {
-              type: "string",
-            },
-            mode: {
-              type: "string",
-              enum: ["search", "recall", "auto", "flash"],
-            },
-            depth: {
-              type: "string",
-              enum: ["snippet", "summary", "full"],
-            },
-            results: {
-              type: "number",
-            },
+            query: { type: "string" },
+            mode: { type: "string", enum: ["search", "recall", "temporal", "frequency"] },
+            depth: { type: "string", enum: ["snippet", "summary", "full"] },
+            results: { type: "number" },
           },
           required: ["query", "mode"],
         },
       },
-      searchMode: {
-        type: "string",
-        enum: ["auto", "search", "recall", "flash"],
-      },
-      results: {
-        type: "number",
-      },
-      depth: {
-        type: "string",
-        enum: ["snippet", "summary", "full"],
-      },
     },
+    required: ["queries"],
   }
 
   export type Input = {
@@ -156,7 +128,6 @@ export namespace SearchAgent {
     log.info("search agent queries", {
       sessionID: input.sessionID,
       queries: args.queries,
-      legacyInput: args.legacy,
     })
     if (args.queries.length === 0) return
 
@@ -177,7 +148,7 @@ export namespace SearchAgent {
       metadata: {
         model: cfg.model,
         timeout,
-        inputFormat: args.legacy ? "legacy" : "queries",
+        inputFormat: "queries",
         queries: args.queries,
       },
     }
@@ -302,64 +273,18 @@ export namespace SearchAgent {
 
   function parse(input: unknown) {
     const body = typeof input === "object" && input ? (input as Record<string, unknown>) : {}
-
-    const queriesRaw = body["queries"]
-    if (Array.isArray(queriesRaw)) {
-      const queries = queriesRaw
-        .filter((q): q is Record<string, unknown> => typeof q === "object" && q !== null)
-        .map((q) => ({
-          query: typeof q.query === "string" ? q.query.trim() : "",
-          mode: typeof q.mode === "string" ? q.mode : "search",
-          depth: typeof q.depth === "string" ? q.depth : undefined,
-          results: typeof q.results === "number" ? q.results : undefined,
-        }))
-        .filter((q) => q.query.length > 0)
-
-      if (queries.length > 0) {
-        return { queries, legacy: false }
-      }
-    }
-
-    const all = read(body["queries"])
-    let search = read(body["searchQueries"])
-    let recall = read(body["recallQueries"])
-    if (search.length === 0 && recall.length === 0 && all.length > 0) {
-      const mode = body["searchMode"]
-      if (mode === "recall") recall = all
-      else if (mode === "search" || mode === "flash") search = all
-      else {
-        search = all
-        recall = all
-      }
-    }
-    const results = typeof body["results"] === "number" ? body["results"] : undefined
-    const depth =
-      body["depth"] === "snippet" || body["depth"] === "summary" || body["depth"] === "full"
-        ? body["depth"]
-        : undefined
-
-    const queries = [
-      ...search.map((q) => ({ query: q, mode: "search", depth, results })),
-      ...recall.map((q) => ({ query: q, mode: "recall", depth, results })),
-    ]
-
-    return {
-      queries,
-      legacy: true,
-    }
-  }
-
-  function read(input: unknown) {
-    if (typeof input === "string") {
-      const text = input.trim()
-      if (!text) return []
-      return [text]
-    }
-    if (!Array.isArray(input)) return []
-    return input
-      .filter((x): x is string => typeof x === "string")
-      .map((x) => x.trim())
-      .filter((x) => x)
+    const raw = body["queries"]
+    if (!Array.isArray(raw)) return { queries: [] }
+    const queries = raw
+      .filter((q): q is Record<string, unknown> => typeof q === "object" && q !== null)
+      .map((q) => ({
+        query: typeof q.query === "string" ? q.query.trim() : "",
+        mode: typeof q.mode === "string" ? q.mode : "search",
+        depth: typeof q.depth === "string" ? q.depth : undefined,
+        results: typeof q.results === "number" ? q.results : undefined,
+      }))
+      .filter((q) => q.query.length > 0)
+    return { queries }
   }
 
   function countUserMessages(messages: MessageV2.WithParts[]) {
@@ -375,8 +300,8 @@ export namespace SearchAgent {
     const tools = await MCP.tools()
     const omniTool = pickTool(tools, "omni_tool")
     if (!omniTool?.execute) {
-      log.warn("omni_tool not found, falling back to legacy search")
-      return legacySearch(input, timeout)
+      log.warn("omni_tool not found, falling back to direct MCP search")
+      return directSearch(input, timeout)
     }
 
     try {
@@ -392,12 +317,12 @@ export namespace SearchAgent {
       if (!text.trim()) return
       return { text }
     } catch (error) {
-      log.warn("omni_tool failed, falling back to legacy search", { error })
-      return legacySearch(input, timeout)
+      log.warn("omni_tool failed, falling back to direct MCP search", { error })
+      return directSearch(input, timeout)
     }
   }
 
-  async function legacySearch(input: { queries: Query[] }, timeout: number): Promise<{ text: string } | undefined> {
+  async function directSearch(input: { queries: Query[] }, timeout: number): Promise<{ text: string } | undefined> {
     const tools = await MCP.tools()
     const searchTool = pickTool(tools, "search_memory")
     const recallTool = pickTool(tools, "recall_context")
