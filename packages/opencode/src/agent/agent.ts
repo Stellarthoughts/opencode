@@ -43,6 +43,7 @@ export namespace Agent {
         .optional(),
       variant: z.string().optional(),
       prompt: z.string().optional(),
+      searchAgent: Config.SearchAgent.optional(),
       options: z.record(z.string(), z.any()),
       steps: z.number().int().positive().optional(),
     })
@@ -257,6 +258,7 @@ export namespace Agent {
             item.hidden = value.hidden ?? item.hidden
             item.name = value.name ?? item.name
             item.steps = value.steps ?? item.steps
+            item.searchAgent = value.searchAgent ?? item.searchAgent
             item.options = mergeDeep(item.options, value.options ?? {})
             item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
           }
