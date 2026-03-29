@@ -325,7 +325,11 @@ export namespace SessionPrompt {
       const latest = msgs.at(-1)
       const fresh =
         latest?.info.role === "user" &&
-        latest.parts.some((part) => part.type === "text" && !part.ignored && part.text.trim().length > 0)
+        latest.parts.some(
+          (part) =>
+            (part.type === "text" && !part.ignored && !part.synthetic && part.text.trim().length > 0) ||
+            (part.type === "file" && !part.ignored),
+        )
       if (
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&

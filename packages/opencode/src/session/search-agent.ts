@@ -26,7 +26,27 @@ export namespace SearchAgent {
       },
       queries: {
         type: "array",
-        items: { type: "string" },
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            query: {
+              type: "string",
+            },
+            mode: {
+              type: "string",
+              enum: ["search", "recall", "auto", "flash"],
+            },
+            depth: {
+              type: "string",
+              enum: ["snippet", "summary", "full"],
+            },
+            results: {
+              type: "number",
+            },
+          },
+          required: ["query", "mode"],
+        },
       },
       searchMode: {
         type: "string",
@@ -53,6 +73,13 @@ export namespace SearchAgent {
     input: Record<string, unknown>
     output: string
     metadata: Record<string, unknown>
+  }
+
+  type Query = {
+    query: string
+    mode: string
+    depth?: string
+    results?: number
   }
 
   export async function execute(input: Input): Promise<Output | undefined> {
@@ -128,24 +155,18 @@ export namespace SearchAgent {
     const args = parse(call.input)
     log.info("search agent queries", {
       sessionID: input.sessionID,
-      searchQueries: args.search,
-      recallQueries: args.recall,
+      queries: args.queries,
+      legacyInput: args.legacy,
     })
+    if (args.queries.length === 0) return
 
-    const found = await search(args, timeout)
+    const found = await search(args, input.sessionID, countUserMessages(input.messages), timeout)
     if (!found) return
-    const output = [
-      found.search ? `# search_memory\n${found.search.text}` : undefined,
-      found.recall ? `# recall_context\n${found.recall.text}` : undefined,
-    ]
-      .filter((x) => x)
-      .join("\n\n")
+    const output = found.text
 
     if (!output.trim()) return
     log.info("search agent mcp results", {
       sessionID: input.sessionID,
-      searchResults: found.search?.count ?? 0,
-      recallResults: found.recall?.count ?? 0,
       outputSize: output.length,
     })
 
@@ -156,14 +177,8 @@ export namespace SearchAgent {
       metadata: {
         model: cfg.model,
         timeout,
-        queries: {
-          search: args.search,
-          recall: args.recall,
-        },
-        tools: {
-          search: found.search?.name,
-          recall: found.recall?.name,
-        },
+        inputFormat: args.legacy ? "legacy" : "queries",
+        queries: args.queries,
       },
     }
   }
@@ -246,10 +261,11 @@ export namespace SearchAgent {
             .map((x) => x.text.trim())
             .filter((x) => x)
             .join("\n\n")
-          if (!text) return
+          const hasFiles = msg.parts.some((x) => x.type === "file" && !x.ignored)
+          if (!text && !hasFiles) return
           return {
             role: "user",
-            content: text,
+            content: text || "[User sent an image/file without text]",
           }
         }
 
@@ -286,6 +302,24 @@ export namespace SearchAgent {
 
   function parse(input: unknown) {
     const body = typeof input === "object" && input ? (input as Record<string, unknown>) : {}
+
+    const queriesRaw = body["queries"]
+    if (Array.isArray(queriesRaw)) {
+      const queries = queriesRaw
+        .filter((q): q is Record<string, unknown> => typeof q === "object" && q !== null)
+        .map((q) => ({
+          query: typeof q.query === "string" ? q.query.trim() : "",
+          mode: typeof q.mode === "string" ? q.mode : "search",
+          depth: typeof q.depth === "string" ? q.depth : undefined,
+          results: typeof q.results === "number" ? q.results : undefined,
+        }))
+        .filter((q) => q.query.length > 0)
+
+      if (queries.length > 0) {
+        return { queries, legacy: false }
+      }
+    }
+
     const all = read(body["queries"])
     let search = read(body["searchQueries"])
     let recall = read(body["recallQueries"])
@@ -303,11 +337,15 @@ export namespace SearchAgent {
       body["depth"] === "snippet" || body["depth"] === "summary" || body["depth"] === "full"
         ? body["depth"]
         : undefined
+
+    const queries = [
+      ...search.map((q) => ({ query: q, mode: "search", depth, results })),
+      ...recall.map((q) => ({ query: q, mode: "recall", depth, results })),
+    ]
+
     return {
-      search,
-      recall,
-      results,
-      depth,
+      queries,
+      legacy: true,
     }
   }
 
@@ -324,22 +362,54 @@ export namespace SearchAgent {
       .filter((x) => x)
   }
 
+  function countUserMessages(messages: MessageV2.WithParts[]) {
+    return messages.filter((x) => x.info.role === "user").length
+  }
+
   async function search(
-    input: { search: string[]; recall: string[]; results?: number; depth?: string },
+    input: { queries: Query[] },
+    sessionID: string,
+    turnNumber: number,
     timeout: number,
-  ): Promise<
-    | {
-        search?: { name: string; text: string; count: number }
-        recall?: { name: string; text: string; count: number }
-      }
-    | undefined
-  > {
+  ): Promise<{ text: string } | undefined> {
+    const tools = await MCP.tools()
+    const omniTool = pickTool(tools, "omni_tool")
+    if (!omniTool?.execute) {
+      log.warn("omni_tool not found, falling back to legacy search")
+      return legacySearch(input, timeout)
+    }
+
+    try {
+      const result = await omniTool.execute(
+        {
+          queries: input.queries,
+          sessionId: sessionID,
+          turnNumber,
+        },
+        { toolCallId: "search-agent-omni", messages: [], abortSignal: AbortSignal.timeout(timeout) } as any,
+      )
+      const text = toText(result)
+      if (!text.trim()) return
+      return { text }
+    } catch (error) {
+      log.warn("omni_tool failed, falling back to legacy search", { error })
+      return legacySearch(input, timeout)
+    }
+  }
+
+  async function legacySearch(input: { queries: Query[] }, timeout: number): Promise<{ text: string } | undefined> {
     const tools = await MCP.tools()
     const searchTool = pickTool(tools, "search_memory")
     const recallTool = pickTool(tools, "recall_context")
+    const search = input.queries.filter((x) => x.mode !== "recall").map((x) => x.query)
+    const recall = input.queries
+      .filter((x) => x.mode === "recall" || x.mode === "auto")
+      .map((x) => x.query)
+    const results = input.queries.find((x) => x.results !== undefined)?.results
+    const depth = input.queries.find((x) => x.depth !== undefined)?.depth
     const base = {
-      ...(input.results !== undefined ? { results: input.results } : {}),
-      ...(input.depth !== undefined ? { depth: input.depth } : {}),
+      ...(results !== undefined ? { results } : {}),
+      ...(depth !== undefined ? { depth } : {}),
     }
 
     const run = async (
@@ -372,18 +442,22 @@ export namespace SearchAgent {
     }
 
     const [searchResult, recallResult] = await Promise.all([
-      run("search_memory", searchTool, input.search, "search-agent-search"),
-      run("recall_context", recallTool, input.recall, "search-agent-recall"),
+      run("search_memory", searchTool, search, "search-agent-search"),
+      run("recall_context", recallTool, recall, "search-agent-recall"),
     ]).catch(() => {
       return [undefined, undefined] as const
     })
 
     if (searchResult === undefined && recallResult === undefined) return
 
-    return {
-      search: searchResult,
-      recall: recallResult,
-    }
+    const text = [
+      searchResult ? `# search_memory\n${searchResult.text}` : undefined,
+      recallResult ? `# recall_context\n${recallResult.text}` : undefined,
+    ]
+      .filter((x) => x)
+      .join("\n\n")
+    if (!text.trim()) return
+    return { text }
   }
 
   function toCount(input: unknown): number {
